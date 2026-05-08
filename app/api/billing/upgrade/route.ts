@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireVerifiedAuth } from "@/lib/auth";
 import { ok, handleError } from "@/lib/api-response";
 import { upgradePlanSchema } from "@/lib/validations";
 import { createPlanOrder } from "@/lib/services/payment";
@@ -8,7 +8,7 @@ import { db } from "@/lib/db";
 // POST /api/billing/upgrade — create payment order for plan upgrade
 export async function POST(req: NextRequest) {
   try {
-    const user = await requireAuth();
+    const user = await requireVerifiedAuth();
     const body = await req.json();
     const { plan, gateway, idempotencyKey } = upgradePlanSchema.parse(body);
 

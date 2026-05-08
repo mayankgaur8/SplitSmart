@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import type { NextAuthRequest } from "next-auth";
+import { attachCsrfCookie, validateCsrf } from "@/lib/csrf";
 
 // Routes that require authentication
 const PROTECTED_ROUTES = [
@@ -23,6 +24,7 @@ const PUBLIC_API_ROUTES = [
   "/api/auth",
   "/api/health",
   "/api/webhooks",
+  "/api/v1",
 ];
 
 export default auth(function middleware(req: NextAuthRequest) {
@@ -31,6 +33,7 @@ export default auth(function middleware(req: NextAuthRequest) {
 
   // ── Security headers (all responses) ───────────────────────────────────────
   const response = NextResponse.next();
+  attachCsrfCookie(response, req.cookies.get("__Host-splitsmart-csrf")?.value);
   response.headers.set("X-Frame-Options", "DENY");
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -47,14 +50,22 @@ export default auth(function middleware(req: NextAuthRequest) {
     "Content-Security-Policy",
     [
       "default-src 'self'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
       "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://checkout.razorpay.com https://js.stripe.com",
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-      "font-src 'self' https://fonts.gstatic.com",
+      "style-src 'self' 'unsafe-inline'",
+      "font-src 'self'",
       "img-src 'self' blob: data: https:",
       "frame-src https://api.razorpay.com https://js.stripe.com",
-      "connect-src 'self' https://api.razorpay.com https://api.stripe.com wss:",
+      "connect-src 'self' https://api.razorpay.com https://api.stripe.com https://api.anthropic.com https://api.openai.com https://api.groq.com wss:",
     ].join("; ")
   );
+
+  if (!validateCsrf(req)) {
+    return NextResponse.json({ success: false, error: "Invalid CSRF token" }, { status: 403 });
+  }
 
   // ── Public API routes — skip auth ───────────────────────────────────────────
   if (PUBLIC_API_ROUTES.some((r) => pathname.startsWith(r))) {

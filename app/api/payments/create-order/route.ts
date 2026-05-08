@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireVerifiedAuth } from "@/lib/auth";
 import { ok, handleError } from "@/lib/api-response";
 import { createPaymentOrderSchema } from "@/lib/validations";
 import { createRazorpayOrder, createStripePaymentIntent } from "@/lib/services/payment";
@@ -10,7 +10,7 @@ import { getRequestId, tagSentryUser, withLatency } from "@/lib/observability";
 export async function POST(req: NextRequest) {
   const requestId = getRequestId(req);
   try {
-    const user = await requireAuth();
+    const user = await requireVerifiedAuth();
     tagSentryUser(user);
     const body = await req.json();
     const { settlementId, gateway, idempotencyKey } = createPaymentOrderSchema.parse(body);

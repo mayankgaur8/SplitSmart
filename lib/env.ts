@@ -14,6 +14,9 @@ const envSchema = z.object({
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  GROQ_API_KEY: z.string().min(1).optional(),
+  PAGERDUTY_ROUTING_KEY: z.string().min(1).optional(),
   SENTRY_DSN: z.string().url().optional(),
   RESEND_API_KEY: z.string().min(1).optional(),
   EMAIL_DOMAIN: z.string().min(1).optional(),
@@ -76,7 +79,7 @@ export const services = {
   razorpay: Boolean(env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET),
   stripe: Boolean(env.STRIPE_SECRET_KEY),
   redis: Boolean(env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN),
-  ai: Boolean(env.ANTHROPIC_API_KEY),
+  ai: Boolean(env.ANTHROPIC_API_KEY || env.OPENAI_API_KEY || env.GROQ_API_KEY),
   sentry: Boolean(env.SENTRY_DSN),
   email: Boolean(env.RESEND_API_KEY),
 };

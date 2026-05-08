@@ -9,6 +9,7 @@ const config: Config = {
     "^@/(.*)$": "<rootDir>/$1",
   },
   testMatch: ["**/__tests__/**/*.test.ts", "**/__tests__/**/*.test.tsx"],
+  modulePathIgnorePatterns: ["<rootDir>/.next"],
   setupFilesAfterEnv: [],
   coverageDirectory: "coverage",
   collectCoverageFrom: [

@@ -124,6 +124,56 @@ enum NotificationStatus {
   CANCELLED
 }
 
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RiskEventType {
+  SUSPICIOUS_LOGIN
+  IMPOSSIBLE_TRAVEL
+  SESSION_ANOMALY
+  BRUTE_FORCE
+  IP_REPUTATION_BLOCK
+  PAYMENT_ABUSE
+  REFUND_ABUSE
+  DISPOSABLE_EMAIL
+  API_ABUSE
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  DEAD_LETTER
+}
+
+enum ApiKeyScope {
+  READ
+  WRITE
+  BILLING
+  ADMIN
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  FINANCE
+  MEMBER
+  VIEWER
+}
+
+enum CompliancePolicyType {
+  TERMS
+  PRIVACY
+  REFUND
+  COOKIE
+  DPA
+}
+
 enum NotificationType {
   PAYMENT_DUE
   PAYMENT_RECEIVED
@@ -280,6 +330,12 @@ model User {
   // Consent & compliance
   marketingConsent  Boolean  @default(false)
   whatsappConsent   Boolean  @default(false)
+  emailVerifiedRequired Boolean @default(true)
+  mfaEnabled        Boolean  @default(false)
+  totpSecretHash    String?
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  lastLoginCountry  String?
   gdprDeletedAt     DateTime?
   deletedAt         DateTime?
   createdAt         DateTime @default(now())
@@ -306,12 +362,22 @@ model User {
   revokedSessions   RevokedSession[]
   impersonationSessions ImpersonationSession[] @relation("ImpersonatedUser")
   supportSessions   ImpersonationSession[] @relation("SupportAdmin")
+  devices           UserDevice[]
+  riskEvents        RiskEvent[]
+  recoveryCodes     RecoveryCode[]
+  apiKeys           ApiKey[]
+  customerWebhooks  CustomerWebhook[]
+  workspaceMemberships WorkspaceMember[]
+  ownedWorkspaces   Workspace[] @relation("WorkspaceOwner")
+  complianceAcceptances ComplianceAcceptance[]
+  usageEvents       UsageEvent[]
 
   @@index([email])
   @@index([phone])
   @@index([plan])
   @@index([planStatus])
   @@index([createdAt])
+  @@index([lastLoginAt])
   @@index([reputationScore])
 }
 
@@ -338,6 +404,38 @@ model RevokedSession {
 
   @@index([userId])
   @@index([createdAt])
+}
+
+model UserDevice {
+  id             String   @id @default(cuid())
+  userId         String
+  fingerprintHash String
+  label          String?
+  userAgent      String?
+  ipAddress      String?
+  country        String?
+  lastSeenAt     DateTime @default(now())
+  trustedAt      DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fingerprintHash])
+  @@index([userId])
+  @@index([lastSeenAt])
+  @@index([revokedAt])
+}
+
+model RecoveryCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String    @unique
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([usedAt])
 }
 
 model OtpCode {
@@ -380,6 +478,44 @@ model Group {
   @@index([inviteCode])
   @@index([isArchived])
   @@index([createdAt])
+}
+
+model Workspace {
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  ownerId         String
+  plan            PlanType @default(FREE)
+  seatLimit       Int      @default(5)
+  billingEmail    String?
+  stripeCustomerId String? @unique
+  razorpayContactId String? @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  owner           User     @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  members         WorkspaceMember[]
+
+  @@index([ownerId])
+  @@index([plan])
+  @@index([createdAt])
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(MEMBER)
+  joinedAt    DateTime      @default(now())
+  removedAt   DateTime?
+
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([role])
 }
 
 model GroupMember {
@@ -579,6 +715,28 @@ model Payment {
   @@index([createdAt])
 }
 
+model RiskEvent {
+  id          String        @id @default(cuid())
+  userId      String?
+  type        RiskEventType
+  level       RiskLevel
+  score       Int
+  ipAddress   String?
+  fingerprintHash String?
+  reason      String
+  metadata    Json?
+  resolvedAt  DateTime?
+  createdAt   DateTime      @default(now())
+
+  user        User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([type])
+  @@index([level])
+  @@index([score])
+  @@index([createdAt])
+}
+
 // ─── Notifications ────────────────────────────────────────────────────────────
 
 model Notification {
@@ -623,6 +781,123 @@ model WebhookEvent {
   @@index([eventType])
   @@index([status])
   @@index([createdAt])
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  name        String
+  queue       String
+  status      JobStatus @default(QUEUED)
+  payload     Json
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  runAfter    DateTime  @default(now())
+  lockedAt    DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([queue])
+  @@index([status])
+  @@index([runAfter])
+  @@index([createdAt])
+}
+
+model ApiKey {
+  id          String        @id @default(cuid())
+  userId      String
+  name        String
+  prefix      String
+  keyHash     String        @unique
+  scopes      ApiKeyScope[]
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime      @default(now())
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([prefix])
+  @@index([revokedAt])
+  @@index([expiresAt])
+}
+
+model CustomerWebhook {
+  id          String   @id @default(cuid())
+  userId      String
+  url         String
+  secretHash  String
+  events      String[]
+  isActive    Boolean  @default(true)
+  failureCount Int     @default(0)
+  lastSuccessAt DateTime?
+  lastFailureAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isActive])
+  @@index([createdAt])
+}
+
+model FeatureFlag {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  description String?
+  enabled     Boolean  @default(false)
+  rollout     Int      @default(0)
+  rules       Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([enabled])
+}
+
+model UsageEvent {
+  id          String   @id @default(cuid())
+  userId      String?
+  event       String
+  quantity    Int      @default(1)
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([event])
+  @@index([createdAt])
+}
+
+model CompliancePolicy {
+  id          String               @id @default(cuid())
+  type        CompliancePolicyType
+  version     String
+  contentHash String
+  effectiveAt DateTime
+  createdAt   DateTime             @default(now())
+  acceptances  ComplianceAcceptance[]
+
+  @@unique([type, version])
+  @@index([type])
+  @@index([effectiveAt])
+}
+
+model ComplianceAcceptance {
+  id          String   @id @default(cuid())
+  userId      String
+  policyId    String
+  ipAddress   String?
+  userAgent   String?
+  acceptedAt  DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  policy      CompliancePolicy @relation(fields: [policyId], references: [id])
+
+  @@unique([userId, policyId])
+  @@index([userId])
+  @@index([acceptedAt])
 }
 
 // ─── Gamification ─────────────────────────────────────────────────────────────

@@ -2,6 +2,8 @@
 // Falls back gracefully if API key is absent (returns null / empty arrays).
 import { hasPromptInjectionRisk } from "@/lib/security";
 import { logInfo } from "@/lib/observability";
+import { getCached, setCached } from "@/lib/redis";
+import { hashToken } from "@/lib/security";
 
 const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
 const AI_TIMEOUT_MS = 8000;
@@ -12,15 +14,19 @@ async function callClaude(
   systemPrompt: string,
   maxTokens = 500
 ): Promise<string | null> {
+  const cacheKey = `ai:${hashToken(`${systemPrompt}:${prompt}:${maxTokens}`)}`;
+  const cached = await getCached<string>(cacheKey);
+  if (cached) return cached;
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.warn("[AI] ANTHROPIC_API_KEY not set — AI features disabled");
-    return null;
-  }
   if (SENSITIVE_PAYMENT_PATTERN.test(prompt) || hasPromptInjectionRisk(prompt)) {
     console.warn("[AI] Blocked unsafe or sensitive prompt");
     return null;
   }
+  if (!apiKey && !process.env.OPENAI_API_KEY && !process.env.GROQ_API_KEY) {
+    console.warn("[AI] No provider key set — AI features disabled");
+    return null;
+  }
+  if (!apiKey) return callOpenAICompatible(prompt, systemPrompt, maxTokens, cacheKey);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
@@ -49,9 +55,47 @@ async function callClaude(
       outputTokens: data.usage?.output_tokens ?? null,
       maxTokens,
     });
-    return data.content?.[0]?.text ?? null;
+    const text = data.content?.[0]?.text ?? null;
+    if (text) await setCached(cacheKey, text, 60 * 60);
+    return text;
   } catch (err) {
     console.error("[AI] Fetch error:", err);
+    return callOpenAICompatible(prompt, systemPrompt, maxTokens, cacheKey);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callOpenAICompatible(prompt: string, systemPrompt: string, maxTokens: number, cacheKey: string) {
+  const provider = process.env.OPENAI_API_KEY
+    ? { name: "openai", url: "https://api.openai.com/v1/chat/completions", key: process.env.OPENAI_API_KEY, model: "gpt-4o-mini" }
+    : process.env.GROQ_API_KEY
+    ? { name: "groq", url: "https://api.groq.com/openai/v1/chat/completions", key: process.env.GROQ_API_KEY, model: "llama-3.1-8b-instant" }
+    : null;
+  if (!provider) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    const res = await fetch(provider.url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${provider.key}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: provider.model,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: prompt },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    logInfo("ai.usage", { provider: provider.name, inputTokens: data.usage?.prompt_tokens ?? null, outputTokens: data.usage?.completion_tokens ?? null });
+    const text = data.choices?.[0]?.message?.content ?? null;
+    if (text) await setCached(cacheKey, text, 60 * 60);
+    return text;
+  } catch {
     return null;
   } finally {
     clearTimeout(timeout);

@@ -167,6 +167,18 @@ export async function requireAuth() {
   return session.user as SessionUser;
 }
 
+export async function requireVerifiedAuth() {
+  const user = await requireAuth();
+  const dbUser = await db.user.findUnique({
+    where: { id: user.id },
+    select: { email: true, emailVerified: true, emailVerifiedRequired: true },
+  });
+  if (dbUser?.email && dbUser.emailVerifiedRequired && !dbUser.emailVerified) {
+    throw new AuthError("Email verification required", 403);
+  }
+  return user;
+}
+
 export async function requireRole(
   role: "GROUP_ADMIN" | "TEAM_ADMIN" | "SUPER_ADMIN"
 ) {
