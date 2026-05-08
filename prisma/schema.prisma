@@ -1,0 +1,570 @@
+// SplitSmart — Production Database Schema
+// PostgreSQL via Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  GROUP_ADMIN
+  TEAM_ADMIN
+  SUPER_ADMIN
+}
+
+enum PlanType {
+  FREE
+  PRO
+  TEAM
+}
+
+enum PlanStatus {
+  ACTIVE
+  TRIAL
+  GRACE
+  CANCELLED
+  EXPIRED
+}
+
+enum GroupCategory {
+  FLATMATES
+  TRAVEL
+  FRIENDS
+  COUPLE
+  FAMILY
+  TEAM
+  SUBSCRIPTIONS
+  OTHER
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum SplitType {
+  EQUAL
+  PERCENTAGE
+  CUSTOM
+  SHARES
+}
+
+enum ExpenseCategory {
+  RENT
+  FOOD
+  TRANSPORT
+  UTILITIES
+  ENTERTAINMENT
+  SUBSCRIPTIONS
+  TRAVEL
+  SHOPPING
+  HEALTH
+  EDUCATION
+  OTHER
+}
+
+enum RecurringInterval {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  DISPUTED
+  PARTIAL
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  WALLET
+  CASH
+}
+
+enum PaymentGateway {
+  RAZORPAY
+  STRIPE
+  MANUAL
+}
+
+enum NotificationType {
+  PAYMENT_DUE
+  PAYMENT_RECEIVED
+  EXPENSE_ADDED
+  GROUP_INVITE
+  SETTLEMENT_REQUEST
+  SUBSCRIPTION_RENEWAL
+  BADGE_EARNED
+  STREAK_MILESTONE
+  PLAN_EXPIRING
+  FRAUD_ALERT
+  GENERAL
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  WHATSAPP
+  PUSH
+}
+
+enum BadgeRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+enum SubscriptionCategory {
+  STREAMING
+  MUSIC
+  PRODUCTIVITY
+  CLOUD
+  GAMING
+  OTHER
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+  WEEKLY
+}
+
+enum AuditAction {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  GROUP_CREATED
+  GROUP_UPDATED
+  GROUP_DELETED
+  GROUP_ARCHIVED
+  EXPENSE_CREATED
+  EXPENSE_UPDATED
+  EXPENSE_DELETED
+  SETTLEMENT_CREATED
+  SETTLEMENT_UPDATED
+  SETTLEMENT_COMPLETED
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_DELETED
+  PAYMENT_INITIATED
+  PAYMENT_COMPLETED
+  PAYMENT_FAILED
+  PLAN_UPGRADED
+  PLAN_CANCELLED
+  ADMIN_IMPERSONATION
+  ADMIN_USER_UPDATE
+  FRAUD_FLAGGED
+  FRAUD_FLAG
+  GDPR_EXPORT
+  ACCOUNT_DELETED
+}
+
+// ─── Auth (NextAuth v5) ────────────────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
+model User {
+  id                String    @id @default(cuid())
+  name              String?
+  email             String?   @unique
+  emailVerified     DateTime?
+  image             String?
+  phone             String?   @unique
+  passwordHash      String?
+  role              UserRole  @default(USER)
+
+  // Profile
+  avatarUrl         String?
+  currency          String    @default("INR")
+  timezone          String    @default("Asia/Kolkata")
+  language          String    @default("en")
+
+  // Plan
+  plan              PlanType   @default(FREE)
+  planStatus        PlanStatus @default(ACTIVE)
+  planStartedAt     DateTime?
+  planExpiresAt     DateTime?
+  trialEndsAt       DateTime?
+  stripeCustomerId  String?    @unique
+  razorpayContactId String?    @unique
+
+  // Gamification
+  reputationScore   Int     @default(0)
+  paymentStreak     Int     @default(0)
+  longestStreak     Int     @default(0)
+  lastPaymentAt     DateTime?
+  totalPaid         Float   @default(0)
+  totalOwed         Float   @default(0)
+
+  // Referral
+  referralCode      String?    @unique @default(cuid())
+
+  // Consent & compliance
+  marketingConsent  Boolean  @default(false)
+  whatsappConsent   Boolean  @default(false)
+  gdprDeletedAt     DateTime?
+  deletedAt         DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  accounts          Account[]
+  sessions          Session[]
+  groupMemberships  GroupMember[]
+  createdGroups     Group[]
+  createdExpenses   Expense[]      @relation("ExpenseCreator")
+  expenseSplits     ExpenseSplit[]
+  paidExpenses      Expense[]      @relation("ExpensePayer")
+  fromSettlements   Settlement[]   @relation("SettlementFrom")
+  toSettlements     Settlement[]   @relation("SettlementTo")
+  notifications     Notification[]
+  userBadges        UserBadge[]
+  auditLogs         AuditLog[]
+  invoices          Invoice[]
+  otpCodes          OtpCode[]
+  subscriptions     Subscription[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([plan])
+  @@index([reputationScore])
+}
+
+model OtpCode {
+  id        String   @id @default(cuid())
+  userId    String?
+  phone     String
+  code      String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([phone])
+  @@index([expiresAt])
+}
+
+// ─── Groups ────────────────────────────────────────────────────────────────────
+
+model Group {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  category    GroupCategory @default(OTHER)
+  imageUrl    String?
+  inviteCode  String        @unique @default(cuid())
+  isArchived  Boolean       @default(false)
+  currency    String        @default("INR")
+  totalSpent  Float         @default(0)
+  createdById String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  createdBy     User           @relation(fields: [createdById], references: [id])
+  members       GroupMember[]
+  expenses      Expense[]
+  settlements   Settlement[]
+  subscriptions GroupSubscription[]
+
+  @@index([createdById])
+  @@index([inviteCode])
+  @@index([isArchived])
+}
+
+model GroupMember {
+  id        String     @id @default(cuid())
+  groupId   String
+  userId    String
+  role      MemberRole @default(MEMBER)
+  balance   Float      @default(0)
+  joinedAt  DateTime   @default(now())
+  removedAt DateTime?
+  group     Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id])
+
+  @@unique([groupId, userId])
+  @@index([groupId])
+  @@index([userId])
+}
+
+// ─── Expenses ─────────────────────────────────────────────────────────────────
+
+model Expense {
+  id                String            @id @default(cuid())
+  groupId           String
+  title             String
+  amount            Float
+  currency          String            @default("INR")
+  category          ExpenseCategory   @default(OTHER)
+  splitType         SplitType         @default(EQUAL)
+  paidById          String
+  createdById       String
+  receiptUrl        String?
+  receiptOcrData    Json?
+  notes             String?
+  tags              String[]
+  isRecurring       Boolean           @default(false)
+  recurringInterval RecurringInterval?
+  nextDueDate       DateTime?
+  parentExpenseId   String?
+  isDeleted         Boolean           @default(false)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  group         Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  paidBy        User           @relation("ExpensePayer", fields: [paidById], references: [id])
+  createdBy     User           @relation("ExpenseCreator", fields: [createdById], references: [id])
+  splits        ExpenseSplit[]
+  parent        Expense?       @relation("RecurringExpenses", fields: [parentExpenseId], references: [id])
+  children      Expense[]      @relation("RecurringExpenses")
+
+  @@index([groupId])
+  @@index([paidById])
+  @@index([category])
+  @@index([isRecurring])
+  @@index([nextDueDate])
+  @@index([isDeleted])
+}
+
+model ExpenseSplit {
+  id          String   @id @default(cuid())
+  expenseId   String
+  userId      String
+  amount      Float
+  percentage  Float?
+  shares      Int?
+  isPaid      Boolean  @default(false)
+  paidAt      DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  expense     Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@unique([expenseId, userId])
+  @@index([expenseId])
+  @@index([userId])
+  @@index([isPaid])
+}
+
+// ─── Subscriptions ────────────────────────────────────────────────────────────
+
+model Subscription {
+  id           String               @id @default(cuid())
+  name         String
+  logo         String?
+  color        String?
+  category     SubscriptionCategory @default(OTHER)
+  monthlyCost  Float
+  currency     String               @default("INR")
+  billingCycle BillingCycle         @default(MONTHLY)
+  renewalDate  DateTime
+  autoRenew    Boolean              @default(true)
+  isActive     Boolean              @default(true)
+  usageScore   Int?
+  lastUsed     DateTime?
+  userId       String
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupSubscriptions GroupSubscription[]
+
+  @@index([userId])
+  @@index([isActive])
+  @@index([renewalDate])
+}
+
+model GroupSubscription {
+  id             String       @id @default(cuid())
+  groupId        String
+  subscriptionId String
+  costPerPerson  Float        @default(0)
+  createdAt      DateTime     @default(now())
+
+  group          Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, subscriptionId])
+}
+
+// ─── Settlements ──────────────────────────────────────────────────────────────
+
+model Settlement {
+  id              String           @id @default(cuid())
+  fromUserId      String
+  toUserId        String
+  amount          Float
+  currency        String           @default("INR")
+  status          SettlementStatus @default(PENDING)
+  method          PaymentMethod?
+  gateway         PaymentGateway?
+  groupId         String?
+  note            String?
+  razorpayOrderId String?          @unique
+  razorpayPaymentId String?        @unique
+  stripePaymentId  String?         @unique
+  transactionId   String?
+  failureReason   String?
+  partialAmount   Float?
+  createdAt       DateTime         @default(now())
+  completedAt     DateTime?
+  updatedAt       DateTime         @updatedAt
+
+  fromUser        User             @relation("SettlementFrom", fields: [fromUserId], references: [id])
+  toUser          User             @relation("SettlementTo", fields: [toUserId], references: [id])
+  group           Group?           @relation(fields: [groupId], references: [id])
+
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@index([status])
+  @@index([groupId])
+  @@index([razorpayOrderId])
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+model Notification {
+  id         String              @id @default(cuid())
+  userId     String
+  type       NotificationType
+  channel    NotificationChannel @default(IN_APP)
+  title      String
+  body       String
+  isRead     Boolean             @default(false)
+  actionUrl  String?
+  metadata   Json?
+  sentAt     DateTime?
+  createdAt  DateTime            @default(now())
+
+  user       User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ─── Gamification ─────────────────────────────────────────────────────────────
+
+model Badge {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  name        String
+  description String
+  icon        String
+  color       String
+  rarity      BadgeRarity @default(COMMON)
+  criteria    Json
+  createdAt   DateTime    @default(now())
+
+  userBadges  UserBadge[]
+}
+
+model UserBadge {
+  id          String   @id @default(cuid())
+  userId      String
+  badgeId     String
+  unlockedAt  DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge       Badge    @relation(fields: [badgeId], references: [id])
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+}
+
+// ─── SaaS Billing ─────────────────────────────────────────────────────────────
+
+model Invoice {
+  id                String   @id @default(cuid())
+  userId            String
+  amount            Float
+  currency          String   @default("INR")
+  plan              PlanType
+  status            String   @default("PAID")
+  razorpayPaymentId String?
+  stripePaymentId   String?
+  invoiceUrl        String?
+  paidAt            DateTime?
+  periodStart       DateTime
+  periodEnd         DateTime
+  createdAt         DateTime @default(now())
+
+  user              User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+}
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  userId      String?
+  action      AuditAction
+  resource    String?
+  resourceId  String?
+  metadata    Json?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime    @default(now())
+
+  user        User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}

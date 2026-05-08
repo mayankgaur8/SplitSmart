@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+  NEXTAUTH_URL: http://localhost:3000
+
+jobs:
+  lint-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+        working-directory: splitwise-app
+
+      - run: npx prisma generate
+        working-directory: splitwise-app
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+        working-directory: splitwise-app
+
+      - name: ESLint
+        run: npx eslint . --ext .ts,.tsx --max-warnings 0 || true
+        working-directory: splitwise-app
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+        working-directory: splitwise-app
+
+      - run: npx prisma generate
+        working-directory: splitwise-app
+
+      - name: Run unit tests
+        run: npx jest --testPathPattern="__tests__/unit" --passWithNoTests
+        working-directory: splitwise-app
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+        working-directory: splitwise-app
+
+      - run: npx prisma generate
+        working-directory: splitwise-app
+
+      - name: Next.js build
+        run: npm run build
+        working-directory: splitwise-app
+        env:
+          SKIP_ENV_VALIDATION: true
+
+  e2e:
+    name: E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: splitsmart_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+        working-directory: splitwise-app
+
+      - run: npx playwright install --with-deps chromium
+        working-directory: splitwise-app
+
+      - name: Setup test DB
+        run: npx prisma migrate deploy
+        working-directory: splitwise-app
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/splitsmart_test
+
+      - name: Run Playwright tests
+        run: npx playwright test
+        working-directory: splitwise-app
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/splitsmart_test
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
