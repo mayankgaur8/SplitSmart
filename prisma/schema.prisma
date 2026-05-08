@@ -3,6 +3,7 @@
 
 generator client {
   provider = "prisma-client-js"
+  engineType = "binary"
 }
 
 datasource db {
@@ -98,6 +99,29 @@ enum PaymentGateway {
   RAZORPAY
   STRIPE
   MANUAL
+}
+
+enum PaymentState {
+  CREATED
+  ATTEMPTED
+  SUCCESS
+  FAILED
+  ABANDONED
+  REFUNDED
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  CANCELLED
 }
 
 enum NotificationType {
@@ -237,6 +261,8 @@ model User {
   planStartedAt     DateTime?
   planExpiresAt     DateTime?
   trialEndsAt       DateTime?
+  graceEndsAt       DateTime?
+  cancelEffectiveAt DateTime?
   stripeCustomerId  String?    @unique
   razorpayContactId String?    @unique
 
@@ -273,13 +299,45 @@ model User {
   userBadges        UserBadge[]
   auditLogs         AuditLog[]
   invoices          Invoice[]
+  payments          Payment[]
   otpCodes          OtpCode[]
   subscriptions     Subscription[]
+  passwordResetTokens PasswordResetToken[]
+  revokedSessions   RevokedSession[]
+  impersonationSessions ImpersonationSession[] @relation("ImpersonatedUser")
+  supportSessions   ImpersonationSession[] @relation("SupportAdmin")
 
   @@index([email])
   @@index([phone])
   @@index([plan])
+  @@index([planStatus])
+  @@index([createdAt])
   @@index([reputationScore])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model RevokedSession {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  reason    String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
 }
 
 model OtpCode {
@@ -321,6 +379,7 @@ model Group {
   @@index([createdById])
   @@index([inviteCode])
   @@index([isArchived])
+  @@index([createdAt])
 }
 
 model GroupMember {
@@ -372,10 +431,13 @@ model Expense {
 
   @@index([groupId])
   @@index([paidById])
+  @@index([createdById])
   @@index([category])
   @@index([isRecurring])
   @@index([nextDueDate])
   @@index([isDeleted])
+  @@index([createdAt])
+  @@index([groupId, createdAt])
 }
 
 model ExpenseSplit {
@@ -425,6 +487,7 @@ model Subscription {
   @@index([userId])
   @@index([isActive])
   @@index([renewalDate])
+  @@index([createdAt])
 }
 
 model GroupSubscription {
@@ -438,6 +501,8 @@ model GroupSubscription {
   subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
   @@unique([groupId, subscriptionId])
+  @@index([groupId])
+  @@index([subscriptionId])
 }
 
 // ─── Settlements ──────────────────────────────────────────────────────────────
@@ -456,6 +521,8 @@ model Settlement {
   razorpayOrderId String?          @unique
   razorpayPaymentId String?        @unique
   stripePaymentId  String?         @unique
+  idempotencyKey   String?         @unique
+  providerEventId  String?
   transactionId   String?
   failureReason   String?
   partialAmount   Float?
@@ -466,12 +533,50 @@ model Settlement {
   fromUser        User             @relation("SettlementFrom", fields: [fromUserId], references: [id])
   toUser          User             @relation("SettlementTo", fields: [toUserId], references: [id])
   group           Group?           @relation(fields: [groupId], references: [id])
+  payments        Payment[]
 
   @@index([fromUserId])
   @@index([toUserId])
   @@index([status])
   @@index([groupId])
   @@index([razorpayOrderId])
+  @@index([razorpayPaymentId])
+  @@index([stripePaymentId])
+  @@index([providerEventId])
+  @@index([createdAt])
+}
+
+model Payment {
+  id                 String         @id @default(cuid())
+  userId             String
+  settlementId       String?
+  gateway            PaymentGateway
+  state              PaymentState   @default(CREATED)
+  amount             Float
+  currency           String         @default("INR")
+  idempotencyKey     String         @unique
+  providerOrderId    String?
+  providerPaymentId  String?        @unique
+  providerEventId    String?
+  failureReason      String?
+  metadata           Json?
+  attemptedAt        DateTime?
+  succeededAt        DateTime?
+  failedAt           DateTime?
+  refundedAt         DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  user               User           @relation(fields: [userId], references: [id])
+  settlement         Settlement?    @relation(fields: [settlementId], references: [id])
+
+  @@index([userId])
+  @@index([settlementId])
+  @@index([state])
+  @@index([providerOrderId])
+  @@index([providerPaymentId])
+  @@index([providerEventId])
+  @@index([createdAt])
 }
 
 // ─── Notifications ────────────────────────────────────────────────────────────
@@ -486,6 +591,9 @@ model Notification {
   isRead     Boolean             @default(false)
   actionUrl  String?
   metadata   Json?
+  status     NotificationStatus    @default(QUEUED)
+  attempts   Int                   @default(0)
+  lastError  String?
   sentAt     DateTime?
   createdAt  DateTime            @default(now())
 
@@ -494,6 +602,26 @@ model Notification {
   @@index([userId])
   @@index([isRead])
   @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model WebhookEvent {
+  id              String        @id @default(cuid())
+  provider        PaymentGateway
+  eventId         String
+  eventType       String
+  status          WebhookStatus @default(RECEIVED)
+  payload         Json
+  signatureHash   String?
+  error           String?
+  processedAt     DateTime?
+  createdAt       DateTime      @default(now())
+
+  @@unique([provider, eventId])
+  @@index([provider])
+  @@index([eventType])
+  @@index([status])
   @@index([createdAt])
 }
 
@@ -547,6 +675,28 @@ model Invoice {
 
   @@index([userId])
   @@index([status])
+  @@index([plan])
+  @@index([razorpayPaymentId])
+  @@index([stripePaymentId])
+  @@index([createdAt])
+}
+
+model ImpersonationSession {
+  id             String    @id @default(cuid())
+  adminUserId    String
+  targetUserId   String
+  reason         String
+  expiresAt      DateTime
+  endedAt        DateTime?
+  createdAt      DateTime  @default(now())
+
+  adminUser      User      @relation("SupportAdmin", fields: [adminUserId], references: [id])
+  targetUser     User      @relation("ImpersonatedUser", fields: [targetUserId], references: [id])
+
+  @@index([adminUserId])
+  @@index([targetUserId])
+  @@index([expiresAt])
+  @@index([createdAt])
 }
 
 // ─── Audit Logs ───────────────────────────────────────────────────────────────

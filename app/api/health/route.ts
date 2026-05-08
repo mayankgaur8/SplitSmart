@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { redis } from "@/lib/redis";
+import { services } from "@/lib/env";
 
 // GET /api/health — readiness probe for load balancer / uptime monitors
 export async function GET() {
@@ -23,8 +24,16 @@ export async function GET() {
       checks.redis = "error";
     }
   }
+  checks.razorpay = services.razorpay ? "ok" : "error";
+  checks.stripe = services.stripe ? "ok" : "error";
+  checks.sentry = services.sentry ? "ok" : "error";
+  checks.ai = services.ai ? "ok" : "error";
 
-  const healthy = Object.values(checks).every((v) => v === "ok");
+  const requiredChecks = process.env.NODE_ENV === "production"
+    ? checks
+    : Object.fromEntries(Object.entries(checks).filter(([key]) => key === "database" || key === "redis"));
+
+  const healthy = Object.values(requiredChecks).every((v) => v === "ok");
   return NextResponse.json(
     {
       status: healthy ? "healthy" : "degraded",

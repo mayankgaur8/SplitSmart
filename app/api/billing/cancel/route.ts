@@ -11,9 +11,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { reason } = cancelPlanSchema.parse(body);
 
+    const current = await db.user.findUnique({
+      where: { id: user.id },
+      select: { planExpiresAt: true },
+    });
+    const effectiveAt = current?.planExpiresAt ?? new Date();
+
     await db.user.update({
       where: { id: user.id },
-      data: { planStatus: "CANCELLED" },
+      data: { planStatus: "CANCELLED", cancelEffectiveAt: effectiveAt },
     });
 
     await db.auditLog.create({

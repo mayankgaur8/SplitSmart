@@ -4,13 +4,16 @@ import { ok, handleError } from "@/lib/api-response";
 import { createPaymentOrderSchema } from "@/lib/validations";
 import { createRazorpayOrder, createStripePaymentIntent } from "@/lib/services/payment";
 import { db } from "@/lib/db";
+import { getRequestId, tagSentryUser, withLatency } from "@/lib/observability";
 
 // POST /api/payments/create-order
 export async function POST(req: NextRequest) {
+  const requestId = getRequestId(req);
   try {
     const user = await requireAuth();
+    tagSentryUser(user);
     const body = await req.json();
-    const { settlementId, gateway } = createPaymentOrderSchema.parse(body);
+    const { settlementId, gateway, idempotencyKey } = createPaymentOrderSchema.parse(body);
 
     const settlement = await db.settlement.findUnique({
       where: { id: settlementId },
@@ -25,12 +28,16 @@ export async function POST(req: NextRequest) {
       throw Object.assign(new Error("Settlement already completed"), { statusCode: 400 });
     }
 
-    if (gateway === "RAZORPAY") {
+    return await withLatency("payments.create_order", async () => {
+      const key = idempotencyKey ?? `payment:${gateway}:${settlementId}:${user.id}`;
+
+      if (gateway === "RAZORPAY") {
       const order = await createRazorpayOrder(
         settlementId,
         settlement.amount,
         settlement.currency,
-        { settlementId, userId: user.id }
+        { settlementId, userId: user.id },
+        key
       );
       return ok({
         gateway: "RAZORPAY",
@@ -39,22 +46,23 @@ export async function POST(req: NextRequest) {
         currency: settlement.currency,
         keyId: process.env.RAZORPAY_KEY_ID,
       });
-    }
+      }
 
-    // Stripe
-    const dbUser = await db.user.findUnique({ where: { id: user.id }, select: { stripeCustomerId: true } });
-    const pi = await createStripePaymentIntent(
-      settlementId,
-      settlement.amount,
-      settlement.currency,
-      dbUser?.stripeCustomerId ?? undefined
-    );
-    return ok({
-      gateway: "STRIPE",
-      clientSecret: pi.client_secret,
-      amount: settlement.amount,
-      currency: settlement.currency,
-    });
+      const dbUser = await db.user.findUnique({ where: { id: user.id }, select: { stripeCustomerId: true } });
+      const pi = await createStripePaymentIntent(
+        settlementId,
+        settlement.amount,
+        settlement.currency,
+        dbUser?.stripeCustomerId ?? undefined,
+        key
+      );
+      return ok({
+        gateway: "STRIPE",
+        clientSecret: pi.client_secret,
+        amount: settlement.amount,
+        currency: settlement.currency,
+      });
+    }, { requestId, userId: user.id, settlementId, gateway });
   } catch (err) {
     return handleError(err);
   }

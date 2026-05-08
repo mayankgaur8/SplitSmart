@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth";
 import { createSettlementSchema, paginationSchema } from "@/lib/validations";
 import { ok, created, handleError } from "@/lib/api-response";
 import { getCached, setCached, invalidateCache } from "@/lib/redis";
+import { requireGroupMember } from "@/lib/tenant";
 
 // GET /api/settlements — list settlements (sent or received)
 export async function GET(req: NextRequest) {
@@ -21,6 +22,10 @@ export async function GET(req: NextRequest) {
     const cacheKey = `settlements:${user.id}:${direction}:${status ?? ""}:${groupId ?? ""}:${page}:${limit}`;
     const cached = await getCached(cacheKey);
     if (cached) return ok(cached);
+
+    if (groupId) {
+      await requireGroupMember(user.id, groupId);
+    }
 
     const where: Record<string, unknown> = {
       ...(direction === "sent" ? { fromUserId: user.id } : {}),
@@ -63,12 +68,9 @@ export async function POST(req: NextRequest) {
       throw Object.assign(new Error("Cannot settle with yourself"), { statusCode: 400 });
     }
 
-    // If groupId provided, verify membership
     if (data.groupId) {
-      const member = await db.groupMember.findFirst({
-        where: { groupId: data.groupId, userId: user.id, removedAt: null },
-      });
-      if (!member) throw Object.assign(new Error("Not a member of this group"), { statusCode: 403 });
+      await requireGroupMember(user.id, data.groupId);
+      await requireGroupMember(data.toUserId, data.groupId);
     }
 
     const settlement = await db.settlement.create({

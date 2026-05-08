@@ -6,6 +6,7 @@ import { ok, created, handleError } from "@/lib/api-response";
 import { canUseFeature, isWithinLimit } from "@/lib/services/plan";
 import { invalidateCache, getCached, setCached } from "@/lib/redis";
 import { categorizeExpense } from "@/lib/services/ai";
+import { requireGroupMember } from "@/lib/tenant";
 import type { PlanType, PlanStatus } from "@prisma/client";
 
 // GET /api/expenses — list expenses across groups or within a group
@@ -107,10 +108,7 @@ export async function POST(req: NextRequest) {
     const data = createExpenseSchema.parse(body);
 
     // Verify group membership
-    const member = await db.groupMember.findFirst({
-      where: { groupId: data.groupId, userId: user.id, removedAt: null },
-    });
-    if (!member) throw Object.assign(new Error("Not a member of this group"), { statusCode: 403 });
+    await requireGroupMember(user.id, data.groupId);
 
     // AI categorization if no explicit category (Pro feature, graceful fallback)
     let category = data.category;
@@ -130,73 +128,73 @@ export async function POST(req: NextRequest) {
       splits = members.map((m) => ({ userId: m.userId, amount: Math.round(share * 100) / 100 }));
     }
 
-    const expense = await db.expense.create({
-      data: {
-        groupId: data.groupId,
-        title: data.title,
-        amount: data.amount,
-        currency: data.currency,
-        category,
-        splitType: data.splitType,
-        paidById: data.paidById,
-        notes: data.notes,
-        tags: data.tags,
-        isRecurring: data.isRecurring,
-        recurringInterval: data.recurringInterval,
-        createdById: user.id,
-        splits: {
-          create: splits.map((s) => ({
-            userId: s.userId,
-            amount: s.amount,
-            percentage: s.percentage,
-            shares: s.shares,
-            isPaid: s.userId === data.paidById,
-          })),
-        },
-      },
-      include: {
-        paidBy: { select: { id: true, name: true, image: true } },
-        splits: { include: { user: { select: { id: true, name: true } } } },
-      },
+    const participantIds = [...new Set([data.paidById, ...splits.map((s) => s.userId)])];
+    const participantCount = await db.groupMember.count({
+      where: { groupId: data.groupId, userId: { in: participantIds }, removedAt: null },
     });
+    if (participantCount !== participantIds.length) {
+      throw Object.assign(new Error("All payers and split members must belong to the group"), { statusCode: 403 });
+    }
 
-    // Update group member balances
-    await updateGroupBalances(data.groupId, data.paidById, splits, data.amount);
+    const expense = await db.$transaction(async (tx) => {
+      const createdExpense = await tx.expense.create({
+        data: {
+          groupId: data.groupId,
+          title: data.title,
+          amount: data.amount,
+          currency: data.currency,
+          category,
+          splitType: data.splitType,
+          paidById: data.paidById,
+          notes: data.notes,
+          tags: data.tags,
+          isRecurring: data.isRecurring,
+          recurringInterval: data.recurringInterval,
+          createdById: user.id,
+          splits: {
+            create: splits.map((s) => ({
+              userId: s.userId,
+              amount: s.amount,
+              percentage: s.percentage,
+              shares: s.shares,
+              isPaid: s.userId === data.paidById,
+            })),
+          },
+        },
+        include: {
+          paidBy: { select: { id: true, name: true, image: true } },
+          splits: { include: { user: { select: { id: true, name: true } } } },
+        },
+      });
+
+      const othersTotal = splits.filter((s) => s.userId !== data.paidById).reduce((sum, s) => sum + s.amount, 0);
+      await tx.groupMember.updateMany({
+        where: { groupId: data.groupId, userId: data.paidById },
+        data: { balance: { increment: othersTotal } },
+      });
+
+      for (const split of splits) {
+        if (split.userId === data.paidById) continue;
+        await tx.groupMember.updateMany({
+          where: { groupId: data.groupId, userId: split.userId },
+          data: { balance: { decrement: split.amount } },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: { userId: user.id, action: "EXPENSE_CREATED", resource: "Expense", resourceId: createdExpense.id },
+      });
+
+      return createdExpense;
+    });
 
     // Notifications for split members (non-blocking)
     notifyExpenseSplits(expense.id, data.groupId, data.paidById, data.title, data.amount, splits).catch(() => {});
-
-    await db.auditLog.create({
-      data: { userId: user.id, action: "EXPENSE_CREATED", resource: "Expense", resourceId: expense.id },
-    });
 
     await invalidateCache(`expenses:${user.id}:*`);
     return created(expense);
   } catch (err) {
     return handleError(err);
-  }
-}
-
-async function updateGroupBalances(
-  groupId: string,
-  paidById: string,
-  splits: { userId: string; amount: number }[],
-  _total: number
-) {
-  // Payer's balance increases by what others owe them
-  const othersTotal = splits.filter((s) => s.userId !== paidById).reduce((sum, s) => sum + s.amount, 0);
-
-  await db.groupMember.updateMany({
-    where: { groupId, userId: paidById },
-    data: { balance: { increment: othersTotal } },
-  });
-
-  for (const split of splits) {
-    if (split.userId === paidById) continue;
-    await db.groupMember.updateMany({
-      where: { groupId, userId: split.userId },
-      data: { balance: { decrement: split.amount } },
-    });
   }
 }
 

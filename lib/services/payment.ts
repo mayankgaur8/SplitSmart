@@ -2,22 +2,24 @@ import Razorpay from "razorpay";
 import Stripe from "stripe";
 import crypto from "crypto";
 import { db } from "@/lib/db";
+import { env } from "@/lib/env";
+import { logError } from "@/lib/observability";
 import { PLAN_PRICING } from "./plan";
 import type { PlanType } from "@prisma/client";
 
 // ─── Clients ──────────────────────────────────────────────────────────────────
 
 export const razorpay =
-  process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
+  env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET
     ? new Razorpay({
-        key_id: process.env.RAZORPAY_KEY_ID,
-        key_secret: process.env.RAZORPAY_KEY_SECRET,
+        key_id: env.RAZORPAY_KEY_ID,
+        key_secret: env.RAZORPAY_KEY_SECRET,
       })
     : null;
 
 export const stripe =
-  process.env.STRIPE_SECRET_KEY
-    ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2026-04-22.dahlia" })
+  env.STRIPE_SECRET_KEY
+    ? new Stripe(env.STRIPE_SECRET_KEY, { apiVersion: "2026-04-22.dahlia" })
     : null;
 
 // ─── Settlement payment order ─────────────────────────────────────────────────
@@ -26,9 +28,15 @@ export async function createRazorpayOrder(
   settlementId: string,
   amount: number,
   currency: string,
-  notes?: Record<string, string>
+  notes?: Record<string, string>,
+  idempotencyKey = `settlement:${settlementId}:razorpay`
 ) {
   if (!razorpay) throw new Error("Razorpay not configured");
+
+  const existing = await db.payment.findUnique({ where: { idempotencyKey } });
+  if (existing?.providerOrderId) {
+    return { id: existing.providerOrderId, amount: Math.round(amount * 100), currency };
+  }
 
   const amountPaise = Math.round(amount * 100);
   const order = await razorpay.orders.create({
@@ -38,9 +46,26 @@ export async function createRazorpayOrder(
     notes: notes ?? {},
   });
 
-  await db.settlement.update({
-    where: { id: settlementId },
-    data: { razorpayOrderId: order.id, status: "PROCESSING", gateway: "RAZORPAY" },
+  await db.$transaction(async (tx) => {
+    await tx.payment.upsert({
+      where: { idempotencyKey },
+      create: {
+        userId: notes?.userId ?? "",
+        settlementId,
+        gateway: "RAZORPAY",
+        state: "CREATED",
+        amount,
+        currency,
+        idempotencyKey,
+        providerOrderId: order.id,
+        metadata: notes ?? {},
+      },
+      update: { providerOrderId: order.id, state: "CREATED" },
+    });
+    await tx.settlement.update({
+      where: { id: settlementId },
+      data: { razorpayOrderId: order.id, status: "PROCESSING", gateway: "RAZORPAY", idempotencyKey },
+    });
   });
 
   return order;
@@ -50,9 +75,15 @@ export async function createStripePaymentIntent(
   settlementId: string,
   amount: number,
   currency: string,
-  customerId?: string
+  customerId?: string,
+  idempotencyKey = `settlement:${settlementId}:stripe`
 ) {
   if (!stripe) throw new Error("Stripe not configured");
+
+  const existing = await db.payment.findUnique({ where: { idempotencyKey } });
+  if (existing?.providerPaymentId) {
+    return { id: existing.providerPaymentId, client_secret: null };
+  }
 
   const amountCents = Math.round(amount * 100);
   const pi = await stripe.paymentIntents.create({
@@ -63,9 +94,27 @@ export async function createStripePaymentIntent(
     automatic_payment_methods: { enabled: true },
   });
 
-  await db.settlement.update({
-    where: { id: settlementId },
-    data: { stripePaymentId: pi.id, status: "PROCESSING", gateway: "STRIPE" },
+  await db.$transaction(async (tx) => {
+    const settlement = await tx.settlement.findUnique({ where: { id: settlementId }, select: { fromUserId: true } });
+    await tx.payment.upsert({
+      where: { idempotencyKey },
+      create: {
+        userId: settlement?.fromUserId ?? "",
+        settlementId,
+        gateway: "STRIPE",
+        state: "CREATED",
+        amount,
+        currency,
+        idempotencyKey,
+        providerPaymentId: pi.id,
+        metadata: { settlementId },
+      },
+      update: { providerPaymentId: pi.id, state: "CREATED" },
+    });
+    await tx.settlement.update({
+      where: { id: settlementId },
+      data: { stripePaymentId: pi.id, status: "PROCESSING", gateway: "STRIPE", idempotencyKey },
+    });
   });
 
   return pi;
@@ -77,7 +126,7 @@ export function verifyRazorpayWebhook(
   rawBody: string,
   signature: string
 ): boolean {
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET ?? env.RAZORPAY_WEBHOOK_SECRET;
   if (!secret) return false;
   const expected = crypto
     .createHmac("sha256", secret)
@@ -97,12 +146,13 @@ export function verifyStripeWebhook(
   rawBody: string,
   signature: string
 ): Stripe.Event | null {
-  if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) return null;
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET ?? env.STRIPE_WEBHOOK_SECRET;
+  if (!stripe || !webhookSecret) return null;
   try {
     return stripe.webhooks.constructEvent(
       rawBody,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET
+      webhookSecret
     );
   } catch {
     return null;
@@ -113,38 +163,76 @@ export function verifyStripeWebhook(
 
 export async function confirmSettlement(
   settlementId: string,
-  transactionId?: string
+  transactionId?: string,
+  providerEventId?: string
 ) {
-  const settlement = await db.settlement.update({
-    where: { id: settlementId },
-    data: {
-      status: "COMPLETED",
-      completedAt: new Date(),
-      transactionId,
-    },
-    include: { fromUser: true, toUser: true },
+  const now = new Date();
+  const settlement = await db.$transaction(async (tx) => {
+    const current = await tx.settlement.findUnique({
+      where: { id: settlementId },
+      include: { fromUser: true, toUser: true },
+    });
+    if (!current) throw Object.assign(new Error("Settlement not found"), { statusCode: 404 });
+    if (current.status === "COMPLETED") return current;
+
+    const updated = await tx.settlement.update({
+      where: { id: settlementId },
+      data: {
+        status: "COMPLETED",
+        completedAt: now,
+        transactionId,
+        providerEventId,
+        razorpayPaymentId: current.gateway === "RAZORPAY" ? transactionId : current.razorpayPaymentId,
+        stripePaymentId: current.gateway === "STRIPE" ? transactionId : current.stripePaymentId,
+      },
+      include: { fromUser: true, toUser: true },
+    });
+
+    await tx.payment.updateMany({
+      where: {
+        OR: [
+          { settlementId },
+          ...(transactionId ? [{ providerPaymentId: transactionId }] : []),
+        ],
+      },
+      data: {
+        state: "SUCCESS",
+        providerPaymentId: transactionId,
+        providerEventId,
+        succeededAt: now,
+      },
+    });
+
+    await tx.user.update({
+      where: { id: current.fromUserId },
+      data: { totalPaid: { increment: current.amount } },
+    });
+
+    if (current.groupId) {
+      await tx.groupMember.updateMany({
+        where: { groupId: current.groupId, userId: current.fromUserId },
+        data: { balance: { increment: current.amount } },
+      });
+      await tx.groupMember.updateMany({
+        where: { groupId: current.groupId, userId: current.toUserId },
+        data: { balance: { decrement: current.amount } },
+      });
+    }
+
+    await tx.auditLog.create({
+      data: {
+        userId: current.fromUserId,
+        action: "SETTLEMENT_COMPLETED",
+        resource: "Settlement",
+        resourceId: settlementId,
+        metadata: { transactionId, providerEventId },
+      },
+    });
+
+    return updated;
   });
 
-  // Update user total_paid
-  await db.user.update({
-    where: { id: settlement.fromUserId },
-    data: { totalPaid: { increment: settlement.amount } },
-  });
-
-  // Update streak
   await updatePaymentStreak(settlement.fromUserId);
-
-  // Update group balance
-  if (settlement.groupId) {
-    await db.groupMember.updateMany({
-      where: { groupId: settlement.groupId, userId: settlement.fromUserId },
-      data: { balance: { increment: settlement.amount } },
-    });
-    await db.groupMember.updateMany({
-      where: { groupId: settlement.groupId, userId: settlement.toUserId },
-      data: { balance: { decrement: settlement.amount } },
-    });
-  }
 
   return settlement;
 }
@@ -249,31 +337,77 @@ export async function activatePlan(
   const expiresAt = new Date(now);
   expiresAt.setMonth(expiresAt.getMonth() + 1);
 
-  await db.user.update({
-    where: { id: userId },
-    data: {
-      plan,
-      planStatus: "ACTIVE",
-      planStartedAt: now,
-      planExpiresAt: expiresAt,
-    },
-  });
+  await db.$transaction(async (tx) => {
+    const existingInvoice = await tx.invoice.findFirst({
+      where: gateway === "RAZORPAY" ? { razorpayPaymentId: paymentId } : { stripePaymentId: paymentId },
+    });
+    if (existingInvoice) return;
 
-  await db.invoice.create({
-    data: {
-      userId,
-      amount: PLAN_PRICING[plan]["INR"],
-      currency: "INR",
-      plan,
-      status: "PAID",
-      [gateway === "RAZORPAY" ? "razorpayPaymentId" : "stripePaymentId"]: paymentId,
-      paidAt: now,
-      periodStart: now,
-      periodEnd: expiresAt,
-    },
-  });
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        plan,
+        planStatus: "ACTIVE",
+        planStartedAt: now,
+        planExpiresAt: expiresAt,
+        graceEndsAt: null,
+        cancelEffectiveAt: null,
+      },
+    });
 
-  await db.auditLog.create({
-    data: { userId, action: "PLAN_UPGRADED", resource: "User", resourceId: userId, metadata: { plan } },
+    await tx.invoice.create({
+      data: {
+        userId,
+        amount: PLAN_PRICING[plan]["INR"],
+        currency: "INR",
+        plan,
+        status: "PAID",
+        [gateway === "RAZORPAY" ? "razorpayPaymentId" : "stripePaymentId"]: paymentId,
+        paidAt: now,
+        periodStart: now,
+        periodEnd: expiresAt,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: { userId, action: "PLAN_UPGRADED", resource: "User", resourceId: userId, metadata: { plan } },
+    });
+  });
+}
+
+export async function markPaymentFailed(settlementId: string, reason: string, providerEventId?: string) {
+  const now = new Date();
+  await db.$transaction([
+    db.settlement.update({
+      where: { id: settlementId },
+      data: { status: "FAILED", failureReason: reason, providerEventId },
+    }),
+    db.payment.updateMany({
+      where: { settlementId },
+      data: { state: "FAILED", failureReason: reason, providerEventId, failedAt: now },
+    }),
+  ]).catch((err) => logError("payment.mark_failed", err, { settlementId, providerEventId }));
+}
+
+export async function recordWebhookEvent(params: {
+  provider: "RAZORPAY" | "STRIPE";
+  eventId: string;
+  eventType: string;
+  rawBody: string;
+  signature?: string;
+}) {
+  const signatureHash = params.signature
+    ? crypto.createHash("sha256").update(params.signature).digest("hex")
+    : undefined;
+  return db.webhookEvent.upsert({
+    where: { provider_eventId: { provider: params.provider, eventId: params.eventId } },
+    create: {
+      provider: params.provider,
+      eventId: params.eventId,
+      eventType: params.eventType,
+      payload: JSON.parse(params.rawBody),
+      signatureHash,
+    },
+    update: {},
   });
 }

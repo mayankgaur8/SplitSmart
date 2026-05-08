@@ -56,6 +56,11 @@ export function handleError(err: unknown): NextResponse<ApiError> {
     );
   }
   if (err instanceof Error) {
+    const statusCode = (err as Error & { statusCode?: number }).statusCode;
+    const code = (err as Error & { code?: string }).code;
+    if (statusCode) {
+      return apiError(err.message, statusCode, code);
+    }
     const isPrisma = err.constructor.name.startsWith("Prisma");
     if (isPrisma) {
       // Don't leak DB internals

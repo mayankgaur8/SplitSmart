@@ -1,7 +1,11 @@
 // AI service — wraps Anthropic Claude API for all AI features.
 // Falls back gracefully if API key is absent (returns null / empty arrays).
+import { hasPromptInjectionRisk } from "@/lib/security";
+import { logInfo } from "@/lib/observability";
 
 const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
+const AI_TIMEOUT_MS = 8000;
+const SENSITIVE_PAYMENT_PATTERN = /(card\s*number|cvv|cvc|otp|pin|secret|razorpay_signature|stripe_secret|payment_secret)/i;
 
 async function callClaude(
   prompt: string,
@@ -13,9 +17,16 @@ async function callClaude(
     console.warn("[AI] ANTHROPIC_API_KEY not set — AI features disabled");
     return null;
   }
+  if (SENSITIVE_PAYMENT_PATTERN.test(prompt) || hasPromptInjectionRisk(prompt)) {
+    console.warn("[AI] Blocked unsafe or sensitive prompt");
+    return null;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
     const res = await fetch(CLAUDE_API_URL, {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
@@ -33,10 +44,17 @@ async function callClaude(
       return null;
     }
     const data = await res.json();
+    logInfo("ai.usage", {
+      inputTokens: data.usage?.input_tokens ?? null,
+      outputTokens: data.usage?.output_tokens ?? null,
+      maxTokens,
+    });
     return data.content?.[0]?.text ?? null;
   } catch (err) {
     console.error("[AI] Fetch error:", err);
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

@@ -112,6 +112,31 @@ const emailTemplates = {
       </div>
     `,
   }),
+
+  invite: (name: string, groupName: string, inviteUrl: string) => ({
+    subject: `${name} invited you to ${groupName} on SplitSmart`,
+    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;background:#060914;color:#f1f5f9;padding:32px;border-radius:16px;"><h2>Join ${groupName}</h2><p style="color:#94a3b8;">${name} invited you to split expenses together.</p><a href="${inviteUrl}" style="display:inline-block;background:#0ea5e9;color:#fff;padding:12px 28px;border-radius:12px;text-decoration:none;font-weight:700;">Accept Invite</a></div>`,
+  }),
+
+  settlement_success: (name: string, amount: string) => ({
+    subject: `Settlement complete: ${amount}`,
+    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;background:#060914;color:#f1f5f9;padding:32px;border-radius:16px;"><h2 style="color:#10b981;">Settlement successful</h2><p style="color:#94a3b8;">Hi ${name}, your ${amount} settlement is marked paid.</p></div>`,
+  }),
+
+  plan_upgrade: (name: string, plan: string) => ({
+    subject: `Welcome to SplitSmart ${plan}`,
+    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;background:#060914;color:#f1f5f9;padding:32px;border-radius:16px;"><h2>Your ${plan} plan is active</h2><p style="color:#94a3b8;">Hi ${name}, paid features are now unlocked.</p></div>`,
+  }),
+
+  failed_payment: (name: string, amount: string) => ({
+    subject: `Payment failed for ${amount}`,
+    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;background:#060914;color:#f1f5f9;padding:32px;border-radius:16px;"><h2 style="color:#ef4444;">Payment failed</h2><p style="color:#94a3b8;">Hi ${name}, your ${amount} payment did not complete. Please retry or use another method.</p></div>`,
+  }),
+
+  password_reset: (name: string, resetUrl: string) => ({
+    subject: "Reset your SplitSmart password",
+    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;background:#060914;color:#f1f5f9;padding:32px;border-radius:16px;"><h2>Password reset</h2><p style="color:#94a3b8;">Hi ${name}, this link expires in 30 minutes.</p><a href="${resetUrl}" style="display:inline-block;background:#0ea5e9;color:#fff;padding:12px 28px;border-radius:12px;text-decoration:none;font-weight:700;">Reset Password</a></div>`,
+  }),
 };
 
 // ─── Send email ───────────────────────────────────────────────────────────────
@@ -136,6 +161,19 @@ export async function sendEmail(
     });
   } catch (err) {
     console.error("[Email send error]", err);
+    await db.auditLog.create({
+      data: {
+        action: "FRAUD_FLAGGED",
+        resource: "Notification",
+        metadata: {
+          status: "FAILED",
+          channel: "EMAIL",
+          to,
+          template,
+          error: err instanceof Error ? err.message : "Unknown error",
+        },
+      },
+    }).catch(() => {});
   }
 }
 

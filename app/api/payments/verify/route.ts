@@ -2,14 +2,17 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { ok, handleError } from "@/lib/api-response";
 import { verifyPaymentSchema } from "@/lib/validations";
-import { verifyRazorpayWebhook, confirmSettlement } from "@/lib/services/payment";
+import { confirmSettlement } from "@/lib/services/payment";
 import { db } from "@/lib/db";
 import crypto from "crypto";
+import { getRequestId, tagSentryUser, withLatency } from "@/lib/observability";
 
 // POST /api/payments/verify — client-side payment verification after Razorpay checkout
 export async function POST(req: NextRequest) {
+  const requestId = getRequestId(req);
   try {
     const user = await requireAuth();
+    tagSentryUser(user);
     const body = await req.json();
     const data = verifyPaymentSchema.parse(body);
 
@@ -32,8 +35,11 @@ export async function POST(req: NextRequest) {
       );
       if (!valid) throw Object.assign(new Error("Payment signature invalid"), { statusCode: 400 });
 
-      await confirmSettlement(data.settlementId, data.razorpayPaymentId);
-      return ok({ verified: true, gateway: "RAZORPAY" });
+      const settlementResult = await withLatency("payments.verify", () =>
+        confirmSettlement(data.settlementId, data.razorpayPaymentId, data.idempotencyKey),
+        { requestId, userId: user.id, settlementId: data.settlementId }
+      );
+      return ok({ verified: true, gateway: "RAZORPAY", settlementId: settlementResult.id });
     }
 
     if (data.stripePaymentIntentId) {

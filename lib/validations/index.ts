@@ -103,6 +103,7 @@ export const createSettlementSchema = z.object({
 export const createPaymentOrderSchema = z.object({
   settlementId: z.string().cuid(),
   gateway: z.enum(["RAZORPAY", "STRIPE"]),
+  idempotencyKey: z.string().min(12).max(120).optional(),
 });
 
 export const verifyPaymentSchema = z.object({
@@ -111,6 +112,7 @@ export const verifyPaymentSchema = z.object({
   razorpayPaymentId: z.string().optional(),
   razorpaySignature: z.string().optional(),
   stripePaymentIntentId: z.string().optional(),
+  idempotencyKey: z.string().min(12).max(120).optional(),
 });
 
 // ─── Subscriptions ────────────────────────────────────────────────────────────
@@ -139,6 +141,7 @@ export const updateNotificationSchema = z.object({
 export const upgradePlanSchema = z.object({
   plan: z.enum(["PRO", "TEAM"]),
   gateway: z.enum(["RAZORPAY", "STRIPE"]).default("RAZORPAY"),
+  idempotencyKey: z.string().min(12).max(120).optional(),
 });
 
 export const cancelPlanSchema = z.object({

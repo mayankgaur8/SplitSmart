@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyRazorpayWebhook, confirmSettlement, activatePlan } from "@/lib/services/payment";
+import { verifyRazorpayWebhook, confirmSettlement, activatePlan, markPaymentFailed, recordWebhookEvent } from "@/lib/services/payment";
 import { db } from "@/lib/db";
+import { logError } from "@/lib/observability";
 import type { PlanType } from "@prisma/client";
 
 // Razorpay sends webhooks as application/json with X-Razorpay-Signature header
@@ -21,6 +22,19 @@ export async function POST(req: NextRequest) {
 
   const eventType = event.event as string;
   const payload = event.payload as Record<string, unknown>;
+  const paymentEntity = (payload.payment as { entity?: Record<string, unknown> } | undefined)?.entity;
+  const eventId = (event.id as string | undefined) ?? `${eventType}:${paymentEntity?.id ?? cryptoRandomFallback(rawBody)}`;
+  const webhookEvent = await recordWebhookEvent({
+    provider: "RAZORPAY",
+    eventId,
+    eventType,
+    rawBody,
+    signature,
+  });
+
+  if (webhookEvent.status === "PROCESSED") {
+    return NextResponse.json({ received: true, replay: true });
+  }
 
   try {
     if (eventType === "payment.captured") {
@@ -29,7 +43,7 @@ export async function POST(req: NextRequest) {
 
       // Settlement payment
       if (notes.settlementId) {
-        await confirmSettlement(notes.settlementId, payment.id as string);
+        await confirmSettlement(notes.settlementId, payment.id as string, eventId);
       }
 
       // Plan upgrade payment
@@ -43,10 +57,7 @@ export async function POST(req: NextRequest) {
       const notes = payment.notes as Record<string, string>;
 
       if (notes.settlementId) {
-        await db.settlement.update({
-          where: { id: notes.settlementId },
-          data: { status: "FAILED" },
-        });
+        await markPaymentFailed(notes.settlementId, "Provider reported payment.failed", eventId);
       }
     }
 
@@ -54,10 +65,21 @@ export async function POST(req: NextRequest) {
       // Order-level confirmation (backup for payment.captured)
       // Already handled above; no-op here
     }
+    await db.webhookEvent.update({
+      where: { id: webhookEvent.id },
+      data: { status: "PROCESSED", processedAt: new Date() },
+    });
   } catch (err) {
-    console.error("[razorpay-webhook]", err);
-    // Return 200 to prevent Razorpay from retrying on our processing errors
+    logError("razorpay.webhook.failed", err, { eventId, eventType });
+    await db.webhookEvent.update({
+      where: { id: webhookEvent.id },
+      data: { status: "FAILED", error: err instanceof Error ? err.message : "Unknown error" },
+    });
   }
 
   return NextResponse.json({ received: true });
+}
+
+function cryptoRandomFallback(rawBody: string) {
+  return Buffer.from(rawBody).toString("base64url").slice(0, 48);
 }

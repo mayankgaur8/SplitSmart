@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 const db = new PrismaClient();
 
 async function main() {
-  console.log("🌱 Seeding database…");
+  console.log("Seeding database...");
 
   // ── Badges ────────────────────────────────────────────────────────────────
   const badges = [
@@ -27,8 +27,15 @@ async function main() {
   }
   console.log(`  ✓ ${badges.length} badges`);
 
-  // ── Demo admin user ───────────────────────────────────────────────────────
+  // Demo admin user is disabled in production unless explicitly allowed.
   const adminEmail = "admin@splitsmart.app";
+  const allowSeedAdmin = process.env.NODE_ENV !== "production" || process.env.ALLOW_PRODUCTION_SEED_ADMIN === "true";
+  if (!allowSeedAdmin) {
+    console.log("  - Seed admin skipped in production");
+    console.log("Seed complete");
+    return;
+  }
+
   const existing = await db.user.findUnique({ where: { email: adminEmail } });
   if (!existing) {
     const hash = await bcrypt.hash("Admin@123", 12);
@@ -49,7 +56,7 @@ async function main() {
     console.log(`  – Admin user already exists`);
   }
 
-  console.log("✅ Seed complete");
+  console.log("Seed complete");
 }
 
 main()

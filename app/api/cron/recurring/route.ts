@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { logError, logInfo } from "@/lib/observability";
 
 // GET /api/cron/recurring — spawns recurring expenses past their due date
 export async function GET(req: NextRequest) {
@@ -65,9 +66,10 @@ export async function GET(req: NextRequest) {
       created++;
     }
 
+    logInfo("cron.recurring.completed", { created, ran: now.toISOString() });
     return NextResponse.json({ ok: true, created, ran: now.toISOString() });
   } catch (err) {
-    console.error("[cron/recurring]", err);
+    logError("cron.recurring.failed", err);
     return NextResponse.json({ error: "Cron failed" }, { status: 500 });
   }
 }

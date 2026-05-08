@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sendDuePaymentReminders, sendSubscriptionRenewalReminders } from "@/lib/services/notification";
+import { logError, logInfo } from "@/lib/observability";
 
 // GET /api/cron/reminders — called daily by Vercel Cron (9:00 AM IST)
 export async function GET(req: NextRequest) {
@@ -14,9 +15,11 @@ export async function GET(req: NextRequest) {
       sendDuePaymentReminders(),
       sendSubscriptionRenewalReminders(),
     ]);
-    return NextResponse.json({ ok: true, ran: new Date().toISOString() });
+    const ran = new Date().toISOString();
+    logInfo("cron.reminders.completed", { ran });
+    return NextResponse.json({ ok: true, ran });
   } catch (err) {
-    console.error("[cron/reminders]", err);
+    logError("cron.reminders.failed", err);
     return NextResponse.json({ error: "Cron failed" }, { status: 500 });
   }
 }
